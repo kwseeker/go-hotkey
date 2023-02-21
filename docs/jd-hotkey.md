@@ -201,9 +201,10 @@ dashboard是spring boot web应用，页面使用模板引擎实现，端口8081�
     ]
     ```
 
-    事件通知处理：事件中的信息只是打印日志用，然后拉取全量rule信息才是重点。
+    1）事件通知处理：事件中的信息只是打印日志用，然后拉取全量rule信息才是重点。
 
     ```java
+    //EtcdStarter
     List<Event> eventList = watchUpdate.getEvents();
     JdLogger.info(getClass(), "rules info changed. begin to fetch new infos. rule change is " + eventList);
     //全量拉取rule信息
@@ -232,16 +233,109 @@ dashboard是spring boot web应用，页面使用模板引擎实现，端口8081�
         }
     }
     
-    //用的Guava的EventBus，EventBusCenter只是用单例模式封装一下
+    //notifyRuleChange 用的Guava的EventBus，EventBusCenter只是用单例模式封装一下
     EventBusCenter.getInstance().post(new KeyRuleInfoChangeEvent(rules));
     ```
 
-    然后找EventBus接收的位置：
+    2）然后找EventBus接收的位置：
 
+    EventBus是典型的观察者模式，只需要找订阅KeyRuleInfoChangeEvent的位置
+
+    ```java
+    //ClientStarter
+    EventBusCenter.register(new KeyRuleHolder());
     
+    //KeyRuleHolder, 即规则更新后，会更新此单例对象的 List<KeyRule> KEY_RULES 
+    //	和 ConcurrentHashMap<Integer, LocalCache> RULE_CACHE_MAP
+    //在synchronized的保护下先删除旧的规则，再添加新的规则
+    @Subscribe
+    public void ruleChange(KeyRuleInfoChangeEvent event) {
+        JdLogger.info(getClass(), "new rules info is :" + event.getKeyRules());
+        List<KeyRule> ruleList = event.getKeyRules();
+        if (ruleList == null) {
+            return;
+        }
+        putRules(ruleList);
+    }
+    
+    //保存规则的超时时间和caffeine的映射
+    private static final ConcurrentHashMap<Integer, LocalCache> RULE_CACHE_MAP = new ConcurrentHashMap<>();
+    ```
+
+    然后再找RULE_CACHE_MAP怎么用的：
+
+    RULE_CACHE_MAP 中的 LocalCache用于缓存探测到的热key，同一超时时间的热key存在同一个缓存实例，方便超时后执行清理。
+
+    ```java
+    //KeyRuleHolder, 通过Rule的key（前缀或键名或通配符）查找对应的Caffeine缓存实例
+    public static LocalCache findByKey(String key) {
+        if (StrUtil.isEmpty(key)) {
+            return null;
+        }
+        KeyRule keyRule = findRule(key);
+        if (keyRule == null) {
+            return null;
+        }
+        return RULE_CACHE_MAP.get(keyRule.getDuration());
+    }
+    
+    //findByKey的反向调用链路
+    CacheFactory.getCache(String)  (com.jd.platform.hotkey.client.cache)
+        CacheFactory.getNonNullCache(String)  (com.jd.platform.hotkey.client.cache)
+            DefaultNewKeyListener.deleteKey(String)  (com.jd.platform.hotkey.client.callback)
+                DefaultNewKeyListener.newKey(HotKeyModel)  (com.jd.platform.hotkey.client.callback)
+                DefaultNewKeyListener.addKey(String)  (com.jd.platform.hotkey.client.callback)
+            JdHotKeyStore.getCache(String)  (com.jd.platform.hotkey.client.callback)
+                JdHotKeyStore.setValueDirectly(String, Object)  (com.jd.platform.hotkey.client.callback)
+                JdHotKeyStore.getValueSimple(String)  (com.jd.platform.hotkey.client.callback)
+                JdHotKeyStore.remove(String)  (com.jd.platform.hotkey.client.callback)
+        JdHotKeyStore.inRule(String)  (com.jd.platform.hotkey.client.callback)
+            JdHotKeyStore.isHotKey(String)  (com.jd.platform.hotkey.client.callback)
+                TestController.hotKey(String)  (com.jd.platform.sample.controller)
+            JdHotKeyStore.getValue(String, KeyType)  (com.jd.platform.hotkey.client.callback)
+                JdHotKeyStore.getValue(String)  (com.jd.platform.hotkey.client.callback)看
+    ```
+
+    看JdHotKeyStore中的接口，就是与业务对接的接口。
+
+    ```java
+    //判断key是否是热key，如果不是则发往netty（worker）
+    public static boolean isHotKey(String key)
+    //从本地caffeine取热key对应的值
+    public static Object get(String key)
+    //判断是否是热key，如果是热key，则给value赋值
+    public static void smartSet(String key, Object value)
+    //强制给value赋值
+    public static void forceSet(String key, Object value)
+    //获取value，如果value不存在则发往netty（worker）
+    public static Object getValue(String key, KeyType keyType)
+    //上面方法 keyType == null 的特殊情况
+    public static Object getValue(String key)
+    //删除某个热key，会通知整个集群删除
+    public static void remove(String key)
+    ```
+
+    然后回归场景本身，思考下应该怎么用：
+
+    + 热点数据（如大量请求同一商品信息）
+
+      期望：及时感知某个商品是否是热门商品，是就将热门商品及时加入缓存。
+
+      实现：
+
+      1）将要探测的商品的惟一ID作为key，添加到探测规则中，
+
+      2）要在每次收到请求查询商品时，先校验下商品是否在探测规则中，是的话还要判断是否已经是热key，不是热key就上报到worker统计，是热key就退出，继续执行业务处理（如判断商品信息缓存是否已经添加，没有就添加缓存，缓存超时时间设置比规则中的duration热key过期时间稍长一点）。
+
+      ![](img/jd-hotkey-workflow.png)
+
+      > 如果想探测的商品很多，可以设置规则中的key为商品前缀，所有符合此前缀的商品都会探测。
+
+    + 热用户（如恶意爬虫刷子）
+
+    + 热接口（突发海量请求同一个接口）
 
   + **获取worker信息**
-
   + **key hash计算，数据上报**
 
 + **client使用热key数据**
