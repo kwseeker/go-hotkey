@@ -307,7 +307,7 @@ dashboard是spring boot web应用，页面使用模板引擎实现，端口8081�
     public static void smartSet(String key, Object value)
     //强制给value赋值
     public static void forceSet(String key, Object value)
-    //获取value，如果value不存在则发往netty（worker）
+    //获取value，如果value不存在则发往netty（worker）进行统计
     public static Object getValue(String key, KeyType keyType)
     //上面方法 keyType == null 的特殊情况
     public static Object getValue(String key)
@@ -343,16 +343,27 @@ dashboard是spring boot web应用，页面使用模板引擎实现，端口8081�
 ### dashboard管理
 
 + **连接etcd**
-
 + **热key规则CRUD**
 + **更新事件发布**
 + **client、worker实例状态监控**
 + **worker推送的统计信息查询**
+
++ **热key统计**
+
+  热key统计的实现逻辑在
+
 + **用户管理**
 
 ### worker计算与推送
 
 + **获取热key规则**
+  
   + **连接etcd**
+  
+    使用的etcd-java客户端。
+  
 + **计算热key统计数据**
+
+  
+
 + **结果推送给etcd、client**
